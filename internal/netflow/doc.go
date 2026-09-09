@@ -3,5 +3,6 @@
 // caching each exporter's template definitions before its data records can
 // be decoded).
 //
-// Not yet implemented — tracked in Roadmap.md, stage 3.
+// V5 encode/decode (EncodeV5, DecodeV5) is implemented. V9 support is not
+// yet implemented — tracked in Roadmap.md, stage 3.
 package netflow
