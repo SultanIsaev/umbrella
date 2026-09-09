@@ -20,6 +20,13 @@ profile.cov
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Build output (see Makefile)
+/bin/
+
+# Profiling / tracing output
+*.pprof
+*.trace
+
 # Go workspace file
 go.work
 go.work.sum

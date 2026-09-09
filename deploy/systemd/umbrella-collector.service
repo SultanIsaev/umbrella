@@ -1,0 +1,22 @@
+[Unit]
+Description=Umbrella SIEM telemetry collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/umbrella/collector.env
+ExecStart=/usr/local/bin/collector
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+User=umbrella
+Group=umbrella
+
+[Install]
+WantedBy=multi-user.target

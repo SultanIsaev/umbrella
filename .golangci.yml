@@ -1,0 +1,30 @@
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - ineffassign
+    - gofmt
+    - goimports
+    - gosimple
+    - bodyclose
+    - noctx
+    - revive
+
+linters-settings:
+  govet:
+    enable:
+      - shadow
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+
+issues:
+  exclude-dirs:
+    - test/testdata
