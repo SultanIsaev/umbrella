@@ -1,0 +1,2 @@
+test/testdata/**/*.bin -text
+test/testdata/**/*.pcap -text
