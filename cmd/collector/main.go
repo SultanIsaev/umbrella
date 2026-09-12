@@ -15,9 +15,11 @@ import (
 	"syscall"
 
 	"github.com/SultanIsaev/umbrella/internal/config"
+	"github.com/SultanIsaev/umbrella/internal/ingest"
 	"github.com/SultanIsaev/umbrella/internal/observability"
 	"github.com/SultanIsaev/umbrella/internal/server"
 	"github.com/SultanIsaev/umbrella/internal/version"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -44,29 +46,54 @@ func run() error {
 	defer stop()
 
 	srv := server.New(cfg.HTTPAddr, log)
-	srvErrCh := make(chan error, 1)
+	out := make(chan []byte, 1024) // TODO: емкость пересчитать под реальный pipeline
+
+	consumerDone := make(chan struct{})
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			srvErrCh <- fmt.Errorf("http server: %w", err)
-			return
+		defer close(consumerDone)
+		var n uint64
+		for pkt := range out {
+			n++
+			_ = pkt // TODO: сюда встанет internal/pipeline вместо счётчика-заглушки
 		}
-		srvErrCh <- nil
+		log.Info("ingest consumer stopped", "packets_processed", n)
 	}()
 
-	select {
-	case <-ctx.Done():
-		log.Info("shutdown signal received")
-	case err := <-srvErrCh:
-		if err != nil {
-			return err
-		}
+	listener, err := ingest.NewListener(cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("ingest listener: %w", err)
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
+	g, gCtx := errgroup.WithContext(ctx)
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("http server shutdown: %w", err)
+	g.Go(func() error {
+		return listener.Run(gCtx, out)
+	})
+
+	g.Go(func() error {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("http server: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		<-gCtx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("http server shutdown: %w", err)
+		}
+		return nil
+	})
+
+	runErr := g.Wait()
+	close(out)
+	<-consumerDone
+
+	if runErr != nil {
+		return runErr
 	}
 
 	log.Info("shutdown complete")
