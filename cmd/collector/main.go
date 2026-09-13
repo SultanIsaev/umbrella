@@ -83,24 +83,7 @@ func run() error {
 		}()
 	}
 
-	consumerDone := make(chan struct{})
-	go func() {
-		defer close(consumerDone)
-		var written, writeErrors uint64
-		for result := range results {
-			if writeErr := store.Write(ctx, result.Events()); writeErr != nil {
-				log.Error("storage write failed", "err", writeErr)
-				writeErrors++
-				continue
-			}
-			written++
-		}
-		log.Info("ingest consumer stopped",
-			"packets_processed", written,
-			"packets_invalid", pool.Invalid(),
-			"write_errors", writeErrors,
-		)
-	}()
+	consumerDone := runConsumer(ctx, results, store, pool, log)
 
 	listener, err := ingest.NewListener(cfg.ListenAddr)
 	if err != nil {
@@ -140,36 +123,11 @@ func run() error {
 	runErr := g.Wait()
 	<-consumerDone // после этой точки никто больше не позовёт store.Write
 
-	recordErr := func(msg string, err error) {
-		if err == nil {
-			return
-		}
-		log.Error(msg, "err", err)
+	if err := closeStorage(store, chStore, chStoreCancel, chStoreErrCh, cfg.ShutdownTimeout, log); err != nil {
+		log.Error("storage close failed", "err", err)
 		if runErr == nil {
-			runErr = fmt.Errorf("%s: %w", msg, err)
+			runErr = fmt.Errorf("storage close: %w", err)
 		}
-	}
-
-	if chStore == nil {
-		recordErr("storage close failed", store.Close())
-	} else {
-		// store.Close() сам вызывает CloseInput (мягкая остановка Batcher)
-		// и ждёт фактического возврата Run, прежде чем закрыть соединение —
-		// см. Storage.Close doc. Оборачиваем в горутину, чтобы не зависнуть
-		// тут же навсегда, если сам flush застрял дольше ShutdownTimeout.
-		closeErrCh := make(chan error, 1)
-		go func() { closeErrCh <- store.Close() }()
-
-		select {
-		case err := <-closeErrCh:
-			recordErr("storage close failed", err)
-		case <-time.After(cfg.ShutdownTimeout):
-			log.Warn("clickhouse batcher did not drain gracefully in time, forcing stop")
-			chStoreCancel()
-			recordErr("storage close failed", <-closeErrCh)
-		}
-
-		recordErr("clickhouse batcher stopped with error", <-chStoreErrCh)
 	}
 
 	if runErr != nil {
@@ -180,22 +138,80 @@ func run() error {
 	return nil
 }
 
-// newStorage picks the storage.Storage backend, in priority order:
+// runConsumer вычитывает results и пишет каждый Result в store, пока
+// results не закроет оркестратор (см. pipeline.Pool.Run doc — pool
+// закрывает его сам, дождавшись остановки всех своих воркеров). Возвращает
+// канал, который закрывается, когда цикл завершился — это и есть точка
+// "больше никто не позовёт store.Write", после которой можно безопасно
+// останавливать store (см. closeStorage).
+func runConsumer(ctx context.Context, results <-chan pipeline.Result, store storage.Storage, pool *pipeline.Pool, log *slog.Logger) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var written, writeErrors uint64
+		for result := range results {
+			if writeErr := store.Write(ctx, result.Events()); writeErr != nil {
+				log.Error("storage write failed", "err", writeErr)
+				writeErrors++
+				continue
+			}
+			written++
+		}
+		log.Info("ingest consumer stopped",
+			"packets_processed", written,
+			"packets_invalid", pool.Invalid(),
+			"write_errors", writeErrors,
+		)
+	}()
+	return done
+}
+
+// closeStorage останавливает store. Для ClickHouse (chStore != nil) это
+// значит: store.Close() сам вызывает Batcher.CloseInput (мягкая остановка —
+// досылает последний неполный батч) и ждёт фактического возврата
+// chStore.Run, прежде чем закрыть соединение — см. Storage.Close doc.
+// Вызов обёрнут в горутину и ограничен shutdownTimeout: если сам flush
+// застрял дольше отведённого времени, chStoreCancel жёстко обрывает его,
+// чтобы процесс не завис навсегда. Ошибки из Close() и из самого Run
+// (через chStoreErrCh) объединяются через errors.Join, а не теряется одна
+// в пользу другой.
+func closeStorage(store storage.Storage, chStore *clickhouse.Storage, chStoreCancel context.CancelFunc, chStoreErrCh chan error, shutdownTimeout time.Duration, log *slog.Logger) error {
+	if chStore == nil {
+		return store.Close()
+	}
+
+	closeErrCh := make(chan error, 1)
+	go func() { closeErrCh <- store.Close() }()
+
+	var closeErr error
+	select {
+	case closeErr = <-closeErrCh:
+	case <-time.After(shutdownTimeout):
+		log.Warn("clickhouse batcher did not drain gracefully in time, forcing stop")
+		chStoreCancel()
+		closeErr = <-closeErrCh
+	}
+
+	return errors.Join(closeErr, <-chStoreErrCh)
+}
+
+// newStorage выбирает backend storage.Storage в порядке приоритета:
 //
-//  1. ClickHouse, when cfg.ClickHouseDSN is set — the final sink.
-//  2. Kafka, when cfg.KafkaBrokers is set (and ClickHouseDSN isn't) — the
-//     "durable queue" role from internal/storage/kafka's doc-comment: this
-//     collector only produces, some separate consumer (not run here) drains
-//     the topic into ClickHouse or wherever.
-//  3. A log-only stub otherwise (local dev/loadgen runs — see
-//     Config.ClickHouseDSN doc-comment).
+//  1. ClickHouse, если задан cfg.ClickHouseDSN — финальный sink.
+//  2. Kafka, если задан cfg.KafkaBrokers (и ClickHouseDSN не задан) — роль
+//     "durable очереди" из doc-комментария internal/storage/kafka: этот
+//     collector только пишет в топик, какой-то отдельный consumer (не
+//     запускается здесь) вычитывает его в ClickHouse или куда-то ещё.
+//  3. Лог-заглушка в остальных случаях (локальная разработка/loadgen-
+//     прогоны — см. doc-комментарий Config.ClickHouseDSN).
 //
-// The second return value is non-nil only for the ClickHouse backend, so
-// the caller knows whether it must also run chStore.Run on its own
-// context (never gCtx) and wait for it via chStoreErrCh; unlike it, kafka.Producer and
-// stub.LogStorage are purely synchronous, Close alone is enough to
-// shut them down cleanly — kafka.Writer.Close already flushes and blocks
-// until pending writes complete, no separate batching loop needed).
+// Второе возвращаемое значение непустое только для ClickHouse — по нему
+// вызывающий код понимает, что нужно ещё запустить chStore.Run на
+// отдельном контексте (никогда не gCtx — см. closeStorage) и дождаться его
+// через chStoreErrCh. kafka.Producer и stub.LogStorage, в отличие от него,
+// полностью синхронны — достаточно одного Close: kafka.Writer.Close уже
+// сам дожидается отправки накопленных сообщений, отдельный цикл батчинга
+// им не нужен.
 func newStorage(ctx context.Context, cfg config.Config, log *slog.Logger) (storage.Storage, *clickhouse.Storage, error) {
 	switch {
 	case cfg.ClickHouseDSN != "":
