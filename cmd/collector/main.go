@@ -24,6 +24,7 @@ import (
 	"github.com/SultanIsaev/umbrella/internal/server"
 	"github.com/SultanIsaev/umbrella/internal/storage"
 	"github.com/SultanIsaev/umbrella/internal/storage/clickhouse"
+	"github.com/SultanIsaev/umbrella/internal/storage/kafka"
 	"github.com/SultanIsaev/umbrella/internal/storage/stub"
 	"github.com/SultanIsaev/umbrella/internal/version"
 	"golang.org/x/sync/errgroup"
@@ -149,28 +150,50 @@ func run() error {
 	return nil
 }
 
-// newStorage picks the storage.Storage backend: real ClickHouse when
-// cfg.ClickHouseDSN is set, a log-only stub otherwise (local dev/loadgen
-// runs — see Config.ClickHouseDSN doc-comment). The second return value is
-// non-nil only for the ClickHouse backend, so the caller knows whether it
-// must also run chStore.Run (see Batcher.Run doc — it owns a background
-// goroutine, unlike stub.LogStorage which is purely synchronous).
+// newStorage picks the storage.Storage backend, in priority order:
+//
+//  1. ClickHouse, when cfg.ClickHouseDSN is set — the final sink.
+//  2. Kafka, when cfg.KafkaBrokers is set (and ClickHouseDSN isn't) — the
+//     "durable queue" role from internal/storage/kafka's doc-comment: this
+//     collector only produces, some separate consumer (not run here) drains
+//     the topic into ClickHouse or wherever.
+//  3. A log-only stub otherwise (local dev/loadgen runs — see
+//     Config.ClickHouseDSN doc-comment).
+//
+// The second return value is non-nil only for the ClickHouse backend, so
+// the caller knows whether it must also run chStore.Run (see Batcher.Run
+// doc — it owns a background goroutine; unlike it, kafka.Producer and
+// stub.LogStorage are purely synchronous, Close alone is enough to
+// shut them down cleanly — kafka.Writer.Close already flushes and blocks
+// until pending writes complete, no separate batching loop needed).
 func newStorage(ctx context.Context, cfg config.Config, log *slog.Logger) (storage.Storage, *clickhouse.Storage, error) {
-	if cfg.ClickHouseDSN == "" {
+	switch {
+	case cfg.ClickHouseDSN != "":
+		connectCtx, cancel := context.WithTimeout(ctx, clickhouseConnectTimeout)
+		defer cancel()
+
+		chStore, err := clickhouse.New(connectCtx, clickhouse.Config{
+			DSN:           cfg.ClickHouseDSN,
+			Table:         cfg.ClickHouseTable,
+			BatchSize:     cfg.ClickHouseBatchSize,
+			FlushInterval: cfg.ClickHouseFlushInterval,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return chStore, chStore, nil
+
+	case len(cfg.KafkaBrokers) > 0:
+		producer, err := kafka.NewProducer(kafka.ProducerConfig{
+			Brokers: cfg.KafkaBrokers,
+			Topic:   cfg.KafkaTopic,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return producer, nil, nil
+
+	default:
 		return stub.NewLogStorage(log), nil, nil
 	}
-
-	connectCtx, cancel := context.WithTimeout(ctx, clickhouseConnectTimeout)
-	defer cancel()
-
-	chStore, err := clickhouse.New(connectCtx, clickhouse.Config{
-		DSN:           cfg.ClickHouseDSN,
-		Table:         cfg.ClickHouseTable,
-		BatchSize:     cfg.ClickHouseBatchSize,
-		FlushInterval: cfg.ClickHouseFlushInterval,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return chStore, chStore, nil
 }

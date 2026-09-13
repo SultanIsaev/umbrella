@@ -21,6 +21,7 @@ func TestLoad_Defaults(t *testing.T) {
 	require.Equal(t, 1000, cfg.ClickHouseBatchSize)
 	require.Equal(t, 5*time.Second, cfg.ClickHouseFlushInterval)
 	require.Nil(t, cfg.KafkaBrokers)
+	require.Equal(t, "umbrella-events", cfg.KafkaTopic)
 	require.Equal(t, 10*time.Second, cfg.ShutdownTimeout)
 }
 
@@ -33,6 +34,7 @@ func TestLoad_Overrides(t *testing.T) {
 	t.Setenv("UMBRELLA_CLICKHOUSE_BATCH_SIZE", "500")
 	t.Setenv("UMBRELLA_CLICKHOUSE_FLUSH_INTERVAL", "2s")
 	t.Setenv("UMBRELLA_KAFKA_BROKERS", "broker-1:9092, broker-2:9092")
+	t.Setenv("UMBRELLA_KAFKA_TOPIC", "custom-events")
 	t.Setenv("UMBRELLA_SHUTDOWN_TIMEOUT", "30s")
 
 	cfg, err := config.Load()
@@ -46,6 +48,7 @@ func TestLoad_Overrides(t *testing.T) {
 	require.Equal(t, 500, cfg.ClickHouseBatchSize)
 	require.Equal(t, 2*time.Second, cfg.ClickHouseFlushInterval)
 	require.Equal(t, []string{"broker-1:9092", "broker-2:9092"}, cfg.KafkaBrokers)
+	require.Equal(t, "custom-events", cfg.KafkaTopic)
 	require.Equal(t, 30*time.Second, cfg.ShutdownTimeout)
 }
 

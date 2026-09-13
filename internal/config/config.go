@@ -30,8 +30,14 @@ type Config struct {
 	// batching in internal/storage/clickhouse.
 	ClickHouseBatchSize     int
 	ClickHouseFlushInterval time.Duration
-	// KafkaBrokers is a comma-separated list of broker addresses.
+	// KafkaBrokers is a comma-separated list of broker addresses. Empty
+	// disables the Kafka backend. Takes effect only when ClickHouseDSN is
+	// also empty — see newStorage in cmd/collector: ClickHouse (final
+	// sink) takes priority over Kafka (durable queue in front of some
+	// separate consumer) when both are set.
 	KafkaBrokers []string
+	// KafkaTopic is where the Kafka storage.Storage backend publishes events.
+	KafkaTopic string
 	// ShutdownTimeout bounds how long graceful shutdown waits for in-flight
 	// work before the process exits anyway.
 	ShutdownTimeout time.Duration
@@ -46,6 +52,7 @@ const (
 	envClickHouseBatchSize     = "UMBRELLA_CLICKHOUSE_BATCH_SIZE"
 	envClickHouseFlushInterval = "UMBRELLA_CLICKHOUSE_FLUSH_INTERVAL"
 	envKafkaBrokers            = "UMBRELLA_KAFKA_BROKERS"
+	envKafkaTopic              = "UMBRELLA_KAFKA_TOPIC"
 	envShutdownTimeout         = "UMBRELLA_SHUTDOWN_TIMEOUT"
 )
 
@@ -70,6 +77,7 @@ func Load() (Config, error) {
 		ClickHouseBatchSize:     defaultClickHouseBatchSize,
 		ClickHouseFlushInterval: defaultClickHouseFlushInterval,
 		KafkaBrokers:            splitCSV(getEnv(envKafkaBrokers, "")),
+		KafkaTopic:              getEnv(envKafkaTopic, "umbrella-events"),
 		ShutdownTimeout:         10 * time.Second,
 	}
 

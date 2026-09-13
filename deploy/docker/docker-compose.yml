@@ -1,7 +1,3 @@
-# Локальный ClickHouse для разработки/проверки internal/storage/clickhouse
-# (M7) — без docker-compose.override.yml для прод/CI, только для локальной
-# работы. Запуск: см. `make clickhouse-up` в корне репозитория, либо
-# напрямую `docker compose -f deploy/docker/docker-compose.yml up -d`.
 name: umbrella
 
 services:
@@ -29,10 +25,49 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping" ]
       interval: 2s
       timeout: 2s
       retries: 30
 
+  # Redpanda — Kafka-совместимый брокер (тот же wire-протокол, kafka-go его
+  # не отличает от настоящего Kafka)
+  # хотел глянуть что такое
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.2
+    container_name: umbrella-redpanda
+    command:
+      - redpanda
+      - start
+      - --kafka-addr
+      - internal://0.0.0.0:9093,external://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - internal://redpanda:9093,external://localhost:9092
+      - --rpc-addr
+      - redpanda:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+    ports:
+      # 9092 — внешний listener, то, к чему подключается internal/storage/kafka
+      # с хоста (localhost:9092). 9093 — внутренний, для других контейнеров
+      # той же compose-сети (сейчас не используется, но так их не спутать).
+      - "9092:9092"
+      # 9644 — Admin API, на нём же health-эндпоинт.
+      - "9644:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: [ "CMD", "rpk", "cluster", "health" ]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
 volumes:
   clickhouse-data:
+  redpanda-data:
