@@ -42,8 +42,8 @@ func TestProducer_Write_MarshalsAndSends(t *testing.T) {
 	p := &Producer{writer: w}
 
 	events := []storage.Event{
-		{Timestamp: 100, Source: "a", Fields: map[string]any{"x": float64(1)}},
-		{Timestamp: 200, Source: "b", Fields: map[string]any{"x": float64(2)}},
+		{Timestamp: 100, Source: "a", Fields: storage.Fields{{Key: "x", Value: float64(1)}}},
+		{Timestamp: 200, Source: "b", Fields: storage.Fields{{Key: "x", Value: float64(2)}}},
 	}
 
 	require.NoError(t, p.Write(context.Background(), events))

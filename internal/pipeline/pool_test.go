@@ -8,6 +8,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/SultanIsaev/umbrella/internal/netflow"
+	"github.com/SultanIsaev/umbrella/internal/storage"
 )
 
 func TestMain(m *testing.M) {
@@ -52,24 +53,24 @@ func TestResult_Events(t *testing.T) {
 
 	require.Equal(t, int64(1_700_000_000), events[0].Timestamp)
 	require.Equal(t, "netflow5", events[0].Source)
-	require.Equal(t, map[string]any{
-		"src_addr": "10.0.0.1",
-		"dst_addr": "8.8.8.8",
-		"src_port": uint16(44332),
-		"dst_port": uint16(443),
-		"protocol": uint8(6),
-		"packets":  uint32(10),
-		"bytes":    uint32(1500),
+	require.Equal(t, storage.Fields{
+		{Key: "src_addr", Value: "10.0.0.1"},
+		{Key: "dst_addr", Value: "8.8.8.8"},
+		{Key: "src_port", Value: uint16(44332)},
+		{Key: "dst_port", Value: uint16(443)},
+		{Key: "protocol", Value: uint8(6)},
+		{Key: "packets", Value: uint32(10)},
+		{Key: "bytes", Value: uint32(1500)},
 	}, events[0].Fields)
 
-	require.Equal(t, map[string]any{
-		"src_addr": "192.168.1.1",
-		"dst_addr": "1.1.1.1",
-		"src_port": uint16(53),
-		"dst_port": uint16(12345),
-		"protocol": uint8(17),
-		"packets":  uint32(1),
-		"bytes":    uint32(64),
+	require.Equal(t, storage.Fields{
+		{Key: "src_addr", Value: "192.168.1.1"},
+		{Key: "dst_addr", Value: "1.1.1.1"},
+		{Key: "src_port", Value: uint16(53)},
+		{Key: "dst_port", Value: uint16(12345)},
+		{Key: "protocol", Value: uint8(17)},
+		{Key: "packets", Value: uint32(1)},
+		{Key: "bytes", Value: uint32(64)},
 	}, events[1].Fields)
 }
 

@@ -30,14 +30,14 @@ func (r Result) Events() []storage.Event {
 		events[i] = storage.Event{
 			Timestamp: int64(r.Header.UnixSecs),
 			Source:    "netflow5",
-			Fields: map[string]any{
-				"src_addr": formatIPv4(rec.SrcAddr),
-				"dst_addr": formatIPv4(rec.DstAddr),
-				"src_port": rec.SrcPort,
-				"dst_port": rec.DstPort,
-				"protocol": rec.Prot,
-				"packets":  rec.Packets,
-				"bytes":    rec.Bytes,
+			Fields: storage.Fields{
+				{Key: "src_addr", Value: formatIPv4(rec.SrcAddr)},
+				{Key: "dst_addr", Value: formatIPv4(rec.DstAddr)},
+				{Key: "src_port", Value: rec.SrcPort},
+				{Key: "dst_port", Value: rec.DstPort},
+				{Key: "protocol", Value: rec.Prot},
+				{Key: "packets", Value: rec.Packets},
+				{Key: "bytes", Value: rec.Bytes},
 			},
 		}
 	}

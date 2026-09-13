@@ -86,6 +86,56 @@ allocated in a profiled load run) — that needs `storage.Event.Fields`'s
 type to change to fix, a separate, larger, cross-backend piece of work not
 done here.
 
+### 2026-09-13 — storage.Event.Fields: ordered []Field instead of map[string]any
+
+Follow-up to the entry above — this is the actual fix for the allocation
+cost that one didn't touch. Confirmed via an isolated micro-benchmark before
+touching production code (constructing a 7-entry `map[string]any` vs
+`[]struct{Key string; Value any}`, forced to escape via a package-level
+sink so the compiler couldn't optimize the allocation away): map construction
+was 2 allocs/op vs 1 alloc/op for the slice.
+
+Before: `storage.Event.Fields map[string]any` — `internal/pipeline.Result.Events`
+builds one as a map literal per NetFlow record; every non-string value
+(`uint16`/`uint8`/`uint32`) is boxed into `any` separately, plus the map's
+own bucket allocation.
+
+After: `storage.Fields []Field` (`Field{Key string; Value any}`,
+`internal/storage/storage.go`) — one allocation for the whole backing
+array. `Fields.MarshalJSON`/`UnmarshalJSON` keep the exact wire shape
+`map[string]any` had (a flat JSON object) so ClickHouse's `JSONExtract` and
+any Kafka consumer see no difference — verified with a round-trip test
+(`internal/storage/storage_test.go`).
+
+```
+                          │ events_new.txt │       events_fields_new.txt        │
+                          │     sec/op      │    sec/op     vs base              │
+ResultEvents-8                    376.9n ± 2%   237.0n ±  5%  -37.12% (p=0.000 n=10)
+ResultEvents_MaxRecords-8        10.449µ ± 1%   7.746µ ± 17%  -25.87% (p=0.002 n=10)
+geomean                           1.984µ        1.355µ        -31.73%
+
+                          │ events_new.txt │       events_fields_new.txt        │
+                          │      B/op       │     B/op      vs base              │
+ResultEvents-8                    432.0 ± 0%     336.0 ± 0%  -22.22% (p=0.000 n=10)
+ResultEvents_MaxRecords-8       12.719Ki ± 0%   9.938Ki ± 0%  -21.87% (p=0.000 n=10)
+geomean                          2.316Ki        1.806Ki       -22.04%
+
+                          │ events_new.txt │       events_fields_new.txt       │
+                          │   allocs/op     │ allocs/op   vs base                │
+ResultEvents-8                    8.000 ± 0%   7.000 ± 0%  -12.50% (p=0.000 n=10)
+ResultEvents_MaxRecords-8         211.0 ± 0%   181.0 ± 0%  -14.22% (p=0.000 n=10)
+geomean                           41.09        35.59       -13.36%
+```
+
+Why: a slice literal needs one allocation for its backing array; a map
+literal needs a hashmap header plus buckets, on top of boxing the same
+values into `any` either way — the map's own structure is pure overhead a
+slice doesn't have. `Fields` stays generic across protocols (no
+NetFlow-specific struct baked into `storage.Event` — IPFIX/Syslog/CEF will
+build their own `[]Field` with different keys later), unlike hard-coding a
+typed struct, which would have been faster still but broken that
+protocol-agnostic contract.
+
 Template for each entry:
 
 ```
