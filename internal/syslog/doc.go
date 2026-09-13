@@ -1,6 +1,6 @@
 // Package syslog decodes RFC 5424 syslog messages, including structured
-// data elements, and handles the framing differences between UDP (one
-// datagram per message) and TCP (messages must be delimited explicitly).
-//
-// Not yet implemented — tracked in Roadmap.md, stage 3.
+// data elements. Decode itself is transport-agnostic and ready for UDP
+// (one datagram per message, no reassembly needed); TCP framing (messages
+// arrive as an unbounded byte stream, RFC 6587 octet-counting or
+// newline-delimited) is not yet implemented.
 package syslog
