@@ -78,8 +78,10 @@ func (b *Batcher) CloseInput() {
 // Закрытие in (см. CloseInput) — штатная, "мягкая" остановка: Run досылает
 // последний неполный батч, если он не пуст, и возвращается без ошибки.
 //
-// Отмена ctx — "жёсткая" остановка: Run возвращается немедленно, что уже
-// накоплено в текущем батче — теряется. ctx также ограничивает каждый
+// Отмена ctx — "жёсткая" остановка: Run возвращается немедленно и без
+// ошибки (как и ingest.Listener.Run — это ожидаемый сигнал остановки,
+// например SIGTERM через errgroup, а не сбой приложения), но то, что уже
+// накоплено в текущем батче, — теряется. ctx также ограничивает каждый
 // вызов flush — сетевой поход в ClickHouse не должен виснуть бесконечно.
 func (b *Batcher) Run(ctx context.Context) error {
 	timer := time.NewTimer(b.flushInterval)
@@ -124,7 +126,11 @@ func (b *Batcher) Run(ctx context.Context) error {
 			timer.Reset(b.flushInterval)
 
 		case <-ctx.Done():
-			return ctx.Err()
+			// Отмена ctx — ожидаемый сигнал остановки (как и в
+			// ingest.Listener.Run), а не ошибка приложения: без этого
+			// graceful shutdown по SIGTERM выглядел бы как сбой (ненулевой
+			// код выхода, ctx.Err() в stderr) даже при штатной остановке.
+			return nil
 		}
 	}
 }

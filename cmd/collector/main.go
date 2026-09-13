@@ -9,21 +9,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/SultanIsaev/umbrella/internal/config"
 	"github.com/SultanIsaev/umbrella/internal/ingest"
 	"github.com/SultanIsaev/umbrella/internal/observability"
 	"github.com/SultanIsaev/umbrella/internal/pipeline"
 	"github.com/SultanIsaev/umbrella/internal/server"
+	"github.com/SultanIsaev/umbrella/internal/storage"
+	"github.com/SultanIsaev/umbrella/internal/storage/clickhouse"
 	"github.com/SultanIsaev/umbrella/internal/storage/stub"
 	"github.com/SultanIsaev/umbrella/internal/version"
 	"golang.org/x/sync/errgroup"
 )
+
+// clickhouseConnectTimeout bounds the initial connection+Ping in
+// newStorage — startup should fail fast if ClickHouse is unreachable,
+// not hang indefinitely before the process even starts serving.
+const clickhouseConnectTimeout = 5 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -57,7 +66,10 @@ func run() error {
 		return fmt.Errorf("create pipeline error: %w", err)
 	}
 
-	store := stub.NewLogStorage(log)
+	store, chStore, err := newStorage(ctx, cfg, log)
+	if err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
 
 	consumerDone := make(chan struct{})
 	go func() {
@@ -95,6 +107,12 @@ func run() error {
 		return nil
 	})
 
+	if chStore != nil {
+		g.Go(func() error {
+			return chStore.Run(gCtx)
+		})
+	}
+
 	g.Go(func() error {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("http server: %w", err)
@@ -129,4 +147,30 @@ func run() error {
 
 	log.Info("shutdown complete")
 	return nil
+}
+
+// newStorage picks the storage.Storage backend: real ClickHouse when
+// cfg.ClickHouseDSN is set, a log-only stub otherwise (local dev/loadgen
+// runs — see Config.ClickHouseDSN doc-comment). The second return value is
+// non-nil only for the ClickHouse backend, so the caller knows whether it
+// must also run chStore.Run (see Batcher.Run doc — it owns a background
+// goroutine, unlike stub.LogStorage which is purely synchronous).
+func newStorage(ctx context.Context, cfg config.Config, log *slog.Logger) (storage.Storage, *clickhouse.Storage, error) {
+	if cfg.ClickHouseDSN == "" {
+		return stub.NewLogStorage(log), nil, nil
+	}
+
+	connectCtx, cancel := context.WithTimeout(ctx, clickhouseConnectTimeout)
+	defer cancel()
+
+	chStore, err := clickhouse.New(connectCtx, clickhouse.Config{
+		DSN:           cfg.ClickHouseDSN,
+		Table:         cfg.ClickHouseTable,
+		BatchSize:     cfg.ClickHouseBatchSize,
+		FlushInterval: cfg.ClickHouseFlushInterval,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return chStore, chStore, nil
 }

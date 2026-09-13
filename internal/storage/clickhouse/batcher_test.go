@@ -182,6 +182,9 @@ func TestBatcher_GracefulStop(t *testing.T) {
 	}
 }
 
+// TestBatcher_ContextCancellationStopsRun проверяет, что отмена ctx
+// останавливает Run без ошибки — как и ingest.Listener.Run, это ожидаемый
+// сигнал остановки (graceful shutdown по SIGTERM), а не сбой приложения.
 func TestBatcher_ContextCancellationStopsRun(t *testing.T) {
 	calls := make(chan []storage.Event, 10)
 	b, err := NewBatcher(100, time.Hour, recordingFlush(calls))
@@ -198,7 +201,7 @@ func TestBatcher_ContextCancellationStopsRun(t *testing.T) {
 
 	select {
 	case err := <-runErrCh:
-		require.ErrorIs(t, err, context.Canceled)
+		require.NoError(t, err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancellation")
 	}
