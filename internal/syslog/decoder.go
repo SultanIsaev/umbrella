@@ -80,7 +80,8 @@ func Decode(data []byte) (Message, error) {
 		return Message{}, fmt.Errorf("syslog: missing TIMESTAMP")
 	}
 	if tsTok != nilValue {
-		ts, err := time.Parse(time.RFC3339Nano, tsTok)
+		var ts time.Time
+		ts, err = time.Parse(time.RFC3339Nano, tsTok)
 		if err != nil {
 			return Message{}, fmt.Errorf("syslog: invalid TIMESTAMP %q: %w", tsTok, err)
 		}

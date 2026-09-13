@@ -48,7 +48,12 @@ func run() error {
 		return fmt.Errorf("size must be positive, got %d", *size)
 	}
 
-	conn, err := net.Dial("udp", *target)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, *duration)
+	defer cancel()
+
+	conn, err := (&net.Dialer{}).DialContext(ctx, "udp", *target)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", *target, err)
 	}
@@ -57,11 +62,6 @@ func run() error {
 			slog.Warn("close udp connection", "err", cerr)
 		}
 	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, *duration)
-	defer cancel()
 
 	fillerPayload := make([]byte, *size)
 	ticker := time.NewTicker(time.Second / time.Duration(*pps))

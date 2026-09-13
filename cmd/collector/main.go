@@ -64,8 +64,8 @@ func run() error {
 		defer close(consumerDone)
 		var written, writeErrors uint64
 		for result := range results {
-			if err := store.Write(ctx, result.Events()); err != nil {
-				log.Error("storage write failed", "err", err)
+			if writeErr := store.Write(ctx, result.Events()); writeErr != nil {
+				log.Error("storage write failed", "err", writeErr)
 				writeErrors++
 				continue
 			}

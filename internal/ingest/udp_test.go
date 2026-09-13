@@ -30,7 +30,7 @@ func TestHappyPath(t *testing.T) {
 	}()
 
 	// 2. Отправка пакета
-	conn, err := net.Dial("udp", listener.LocalAddr().String())
+	conn, err := (&net.Dialer{}).DialContext(ctx, "udp", listener.LocalAddr().String())
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -144,7 +144,7 @@ func TestRunBackpressure(t *testing.T) {
 		runErrCh <- listener.Run(ctx, out)
 	}()
 
-	conn, err := net.Dial("udp", listener.LocalAddr().String())
+	conn, err := (&net.Dialer{}).DialContext(ctx, "udp", listener.LocalAddr().String())
 	require.NoError(t, err)
 	defer conn.Close()
 

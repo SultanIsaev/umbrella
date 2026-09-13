@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ func TestHealthz(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := server.New(":0", log)
 
-	req := httptest.NewRequest("GET", "/healthz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 
 	srv.Handler.ServeHTTP(rec, req)

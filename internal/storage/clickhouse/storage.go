@@ -60,7 +60,7 @@ func New(ctx context.Context, cfg Config) (*Storage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: open: %w", err)
 	}
-	if err := conn.Ping(ctx); err != nil {
+	if err = conn.Ping(ctx); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("clickhouse: ping: %w", err)
 	}
