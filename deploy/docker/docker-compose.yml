@@ -68,6 +68,52 @@ services:
       timeout: 5s
       retries: 30
 
+  # Prometheus скрейпит /metrics у collector'а. collector в этом стеке всегда
+  # запускается на хосте (make run-collector), не как отдельный сервис
+  # compose, поэтому таргет — host.docker.internal, а не имя сервиса.
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    container_name: umbrella-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      # На Linux host.docker.internal не резолвится без этой строчки; на
+      # Docker Desktop (mac/Windows) она безвредна — он настраивает алиас сам.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy" ]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  grafana:
+    image: grafana/grafana:12.3.0
+    container_name: umbrella-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Локальный дашборд без пароля — не для прод-конфигурации.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health" ]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
 volumes:
   clickhouse-data:
   redpanda-data:
+  prometheus-data:

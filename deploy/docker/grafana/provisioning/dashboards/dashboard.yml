@@ -1,0 +1,11 @@
+# Говорит Grafana подхватывать дашборды из ./dashboards как файлы, а не
+# требовать ручной импорт через UI при каждом запуске.
+apiVersion: 1
+
+providers:
+  - name: umbrella
+    folder: umbrella
+    type: file
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

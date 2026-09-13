@@ -1,0 +1,13 @@
+# Локальный Prometheus для M10 — скрейпит collector, который в этом
+# compose-стеке всегда запускается на хосте (make run-collector), а не как
+# отдельный сервис: host.docker.internal — стандартный способ для
+# контейнера достучаться до порта на хост-машине (Docker Desktop на
+# mac/Windows настраивает его сам; на Linux нужен extra_hosts, см.
+# docker-compose.yml).
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: umbrella-collector
+    static_configs:
+      - targets: ["host.docker.internal:8080"]

@@ -58,7 +58,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv := server.New(cfg.HTTPAddr, log)
+	metrics := observability.NewMetrics()
+
 	out := make(chan []byte, 1024) // TODO: емкость пересчитать под реальный pipeline
 
 	results := make(chan pipeline.Result, 1000)
@@ -72,6 +73,14 @@ func run() error {
 		return fmt.Errorf("storage: %w", err)
 	}
 
+	listener, err := ingest.NewListener(cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("ingest listener: %w", err)
+	}
+
+	registerMetrics(metrics, listener, pool, out, results)
+	srv := server.New(cfg.HTTPAddr, log, metrics.Registry)
+
 	chStoreCtx, chStoreCancel := context.WithCancel(context.Background())
 	defer chStoreCancel()
 
@@ -83,12 +92,7 @@ func run() error {
 		}()
 	}
 
-	consumerDone := runConsumer(ctx, results, store, pool, log)
-
-	listener, err := ingest.NewListener(cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("ingest listener: %w", err)
-	}
+	consumerDone := runConsumer(ctx, results, store, pool, log, metrics)
 
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -144,18 +148,32 @@ func run() error {
 // канал, который закрывается, когда цикл завершился — это и есть точка
 // "больше никто не позовёт store.Write", после которой можно безопасно
 // останавливать store (см. closeStorage).
-func runConsumer(ctx context.Context, results <-chan pipeline.Result, store storage.Storage, pool *pipeline.Pool, log *slog.Logger) <-chan struct{} {
+//
+// metrics.StorageWriteDuration/StorageEventsWritten/StorageWriteErrors
+// инструментируют именно этот вызов напрямую (.Observe/.Add), а не через
+// RegisterCounterFunc/RegisterGaugeFunc — потому что "успешных записей" и
+// "длительности записи" нет ни в каком уже существующем atomic-счётчике,
+// который можно было бы обернуть.
+func runConsumer(ctx context.Context, results <-chan pipeline.Result, store storage.Storage, pool *pipeline.Pool, log *slog.Logger, metrics *observability.Metrics) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		var written, writeErrors uint64
 		for result := range results {
-			if writeErr := store.Write(ctx, result.Events()); writeErr != nil {
+			events := result.Events()
+
+			start := time.Now()
+			writeErr := store.Write(ctx, events)
+			metrics.StorageWriteDuration.Observe(time.Since(start).Seconds())
+
+			if writeErr != nil {
 				log.Error("storage write failed", "err", writeErr)
 				writeErrors++
+				metrics.StorageWriteErrors.Inc()
 				continue
 			}
 			written++
+			metrics.StorageEventsWritten.Add(float64(len(events)))
 		}
 		log.Info("ingest consumer stopped",
 			"packets_processed", written,
@@ -164,6 +182,32 @@ func runConsumer(ctx context.Context, results <-chan pipeline.Result, store stor
 		)
 	}()
 	return done
+}
+
+// registerMetrics оборачивает уже существующие atomic-счётчики
+// ingest.Listener/pipeline.Pool и текущую длину каналов out/results как
+// Prometheus counter/gauge-функции (см. observability.Metrics doc-
+// комментарий) — сами эти пакеты остаются без зависимости от Prometheus.
+func registerMetrics(metrics *observability.Metrics, listener *ingest.Listener, pool *pipeline.Pool, out chan []byte, results chan pipeline.Result) {
+	metrics.RegisterCounterFunc("ingest", "packets_received_total",
+		"Total number of UDP packets received.",
+		func() float64 { return float64(listener.Received()) })
+	metrics.RegisterCounterFunc("ingest", "packets_dropped_total",
+		"Total number of UDP packets dropped due to a full pipeline queue.",
+		func() float64 { return float64(listener.Dropped()) })
+	metrics.RegisterCounterFunc("ingest", "packets_truncated_total",
+		"Total number of UDP packets truncated by an undersized read buffer.",
+		func() float64 { return float64(listener.Truncated()) })
+	metrics.RegisterCounterFunc("pipeline", "packets_invalid_total",
+		"Total number of packets that failed to parse in the worker pool.",
+		func() float64 { return float64(pool.Invalid()) })
+
+	metrics.RegisterGaugeFunc("ingest", "out_queue_length",
+		"Current number of raw packets buffered between the UDP listener and the worker pool.",
+		func() float64 { return float64(len(out)) })
+	metrics.RegisterGaugeFunc("pipeline", "results_queue_length",
+		"Current number of parsed results buffered between the worker pool and the storage consumer.",
+		func() float64 { return float64(len(results)) })
 }
 
 // closeStorage останавливает store. Для ClickHouse (chStore != nil) это

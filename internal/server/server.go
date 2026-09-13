@@ -9,11 +9,15 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// New builds an *http.Server exposing /healthz and /debug/pprof/* on addr.
-// The caller owns the server's lifecycle (ListenAndServe + Shutdown).
-func New(addr string, log *slog.Logger) *http.Server {
+// New builds an *http.Server exposing /healthz, /debug/pprof/* and /metrics
+// (scraped from reg) on addr. The caller owns the server's lifecycle
+// (ListenAndServe + Shutdown).
+func New(addr string, log *slog.Logger, reg prometheus.Gatherer) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthzHandler(log))
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -21,6 +25,7 @@ func New(addr string, log *slog.Logger) *http.Server {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 
 	return &http.Server{
 		Addr:              addr,
