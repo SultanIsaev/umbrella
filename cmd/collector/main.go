@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"github.com/SultanIsaev/umbrella/internal/config"
 	"github.com/SultanIsaev/umbrella/internal/ingest"
 	"github.com/SultanIsaev/umbrella/internal/observability"
+	"github.com/SultanIsaev/umbrella/internal/pipeline"
 	"github.com/SultanIsaev/umbrella/internal/server"
 	"github.com/SultanIsaev/umbrella/internal/version"
 	"golang.org/x/sync/errgroup"
@@ -48,15 +50,21 @@ func run() error {
 	srv := server.New(cfg.HTTPAddr, log)
 	out := make(chan []byte, 1024) // TODO: емкость пересчитать под реальный pipeline
 
+	results := make(chan pipeline.Result, 1000)
+	pool, err := pipeline.New(runtime.GOMAXPROCS(0))
+	if err != nil {
+		return fmt.Errorf("create pipeline error: %w", err)
+	}
+
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
 		var n uint64
-		for pkt := range out {
+		for result := range results {
 			n++
-			_ = pkt // TODO: сюда встанет internal/pipeline вместо счётчика-заглушки
+			_ = result // TODO: сюда встанет internal/pipeline вместо счётчика-заглушки
 		}
-		log.Info("ingest consumer stopped", "packets_processed", n)
+		log.Info("ingest consumer stopped", "packets_processed", n, "packets_invalid", pool.Invalid())
 	}()
 
 	listener, err := ingest.NewListener(cfg.ListenAddr)
@@ -67,7 +75,13 @@ func run() error {
 	g, gCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
+		defer close(out)
 		return listener.Run(gCtx, out)
+	})
+
+	g.Go(func() error {
+		pool.Run(out, results)
+		return nil
 	})
 
 	g.Go(func() error {
@@ -89,7 +103,6 @@ func run() error {
 	})
 
 	runErr := g.Wait()
-	close(out)
 	<-consumerDone
 
 	if runErr != nil {
