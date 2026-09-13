@@ -72,6 +72,17 @@ func run() error {
 		return fmt.Errorf("storage: %w", err)
 	}
 
+	chStoreCtx, chStoreCancel := context.WithCancel(context.Background())
+	defer chStoreCancel()
+
+	var chStoreErrCh chan error
+	if chStore != nil {
+		chStoreErrCh = make(chan error, 1)
+		go func() {
+			chStoreErrCh <- chStore.Run(chStoreCtx)
+		}()
+	}
+
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
@@ -108,12 +119,6 @@ func run() error {
 		return nil
 	})
 
-	if chStore != nil {
-		g.Go(func() error {
-			return chStore.Run(gCtx)
-		})
-	}
-
 	g.Go(func() error {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("http server: %w", err)
@@ -133,13 +138,38 @@ func run() error {
 	})
 
 	runErr := g.Wait()
-	<-consumerDone
+	<-consumerDone // после этой точки никто больше не позовёт store.Write
 
-	if err := store.Close(); err != nil {
-		log.Error("storage close failed", "err", err)
-		if runErr == nil {
-			runErr = fmt.Errorf("storage close: %w", err)
+	recordErr := func(msg string, err error) {
+		if err == nil {
+			return
 		}
+		log.Error(msg, "err", err)
+		if runErr == nil {
+			runErr = fmt.Errorf("%s: %w", msg, err)
+		}
+	}
+
+	if chStore == nil {
+		recordErr("storage close failed", store.Close())
+	} else {
+		// store.Close() сам вызывает CloseInput (мягкая остановка Batcher)
+		// и ждёт фактического возврата Run, прежде чем закрыть соединение —
+		// см. Storage.Close doc. Оборачиваем в горутину, чтобы не зависнуть
+		// тут же навсегда, если сам flush застрял дольше ShutdownTimeout.
+		closeErrCh := make(chan error, 1)
+		go func() { closeErrCh <- store.Close() }()
+
+		select {
+		case err := <-closeErrCh:
+			recordErr("storage close failed", err)
+		case <-time.After(cfg.ShutdownTimeout):
+			log.Warn("clickhouse batcher did not drain gracefully in time, forcing stop")
+			chStoreCancel()
+			recordErr("storage close failed", <-closeErrCh)
+		}
+
+		recordErr("clickhouse batcher stopped with error", <-chStoreErrCh)
 	}
 
 	if runErr != nil {
@@ -161,8 +191,8 @@ func run() error {
 //     Config.ClickHouseDSN doc-comment).
 //
 // The second return value is non-nil only for the ClickHouse backend, so
-// the caller knows whether it must also run chStore.Run (see Batcher.Run
-// doc — it owns a background goroutine; unlike it, kafka.Producer and
+// the caller knows whether it must also run chStore.Run on its own
+// context (never gCtx) and wait for it via chStoreErrCh; unlike it, kafka.Producer and
 // stub.LogStorage are purely synchronous, Close alone is enough to
 // shut them down cleanly — kafka.Writer.Close already flushes and blocks
 // until pending writes complete, no separate batching loop needed).
