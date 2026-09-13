@@ -1,0 +1,38 @@
+# Локальный ClickHouse для разработки/проверки internal/storage/clickhouse
+# (M7) — без docker-compose.override.yml для прод/CI, только для локальной
+# работы. Запуск: см. `make clickhouse-up` в корне репозитория, либо
+# напрямую `docker compose -f deploy/docker/docker-compose.yml up -d`.
+name: umbrella
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.7
+    container_name: umbrella-clickhouse
+    ports:
+      # 9000 — нативный протокол, его использует internal/storage/clickhouse
+      # (clickhouse-go/v2, PrepareBatch/Append/Send).
+      - "9000:9000"
+      # 8123 — HTTP, удобно для ручной проверки: curl/clickhouse-client/
+      # встроенный веб-плей (http://localhost:8123/play).
+      - "8123:8123"
+    environment:
+      CLICKHOUSE_DB: umbrella
+      CLICKHOUSE_USER: umbrella
+      CLICKHOUSE_PASSWORD: umbrella
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      # Выполняется один раз при первом старте (пустой /var/lib/clickhouse) —
+      # создаёт таблицу под схему, которую ожидает internal/storage/clickhouse.
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  clickhouse-data:

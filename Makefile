@@ -1,4 +1,5 @@
-.PHONY: fmt vet lint test race bench build build-collector build-loadgen docker run-collector clean
+.PHONY: fmt vet lint test race bench build build-collector build-loadgen docker run-collector clean \
+	clickhouse-up clickhouse-down clickhouse-logs clickhouse-cli
 
 BINDIR := bin
 MODULE := github.com/SultanIsaev/umbrella
@@ -46,3 +47,17 @@ run-collector: build-collector
 
 clean:
 	rm -rf $(BINDIR)
+
+# Локальный ClickHouse для internal/storage/clickhouse (M7) — не для прод/CI.
+clickhouse-up:
+	docker compose -f deploy/docker/docker-compose.yml up -d --wait
+
+clickhouse-down:
+	docker compose -f deploy/docker/docker-compose.yml down
+
+clickhouse-logs:
+	docker compose -f deploy/docker/docker-compose.yml logs -f clickhouse
+
+clickhouse-cli:
+	docker compose -f deploy/docker/docker-compose.yml exec clickhouse \
+		clickhouse-client --user umbrella --password umbrella --database umbrella
