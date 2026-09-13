@@ -20,6 +20,7 @@ import (
 	"github.com/SultanIsaev/umbrella/internal/observability"
 	"github.com/SultanIsaev/umbrella/internal/pipeline"
 	"github.com/SultanIsaev/umbrella/internal/server"
+	"github.com/SultanIsaev/umbrella/internal/storage/stub"
 	"github.com/SultanIsaev/umbrella/internal/version"
 	"golang.org/x/sync/errgroup"
 )
@@ -56,15 +57,25 @@ func run() error {
 		return fmt.Errorf("create pipeline error: %w", err)
 	}
 
+	store := stub.NewLogStorage(log)
+
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
-		var n uint64
+		var written, writeErrors uint64
 		for result := range results {
-			n++
-			_ = result // TODO: сюда встанет internal/pipeline вместо счётчика-заглушки
+			if err := store.Write(ctx, result.Events()); err != nil {
+				log.Error("storage write failed", "err", err)
+				writeErrors++
+				continue
+			}
+			written++
 		}
-		log.Info("ingest consumer stopped", "packets_processed", n, "packets_invalid", pool.Invalid())
+		log.Info("ingest consumer stopped",
+			"packets_processed", written,
+			"packets_invalid", pool.Invalid(),
+			"write_errors", writeErrors,
+		)
 	}()
 
 	listener, err := ingest.NewListener(cfg.ListenAddr)
@@ -104,6 +115,13 @@ func run() error {
 
 	runErr := g.Wait()
 	<-consumerDone
+
+	if err := store.Close(); err != nil {
+		log.Error("storage close failed", "err", err)
+		if runErr == nil {
+			runErr = fmt.Errorf("storage close: %w", err)
+		}
+	}
 
 	if runErr != nil {
 		return runErr

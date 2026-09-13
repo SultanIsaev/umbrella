@@ -2,15 +2,47 @@ package pipeline
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 
 	"github.com/SultanIsaev/umbrella/internal/netflow"
+	"github.com/SultanIsaev/umbrella/internal/storage"
 )
 
 type Result struct {
 	Header  netflow.Header
 	Records []netflow.Record
+}
+
+// Events превращает один разобранный NetFlow-пакет в набор нормализованных
+// событий — по одному на каждый Record (это и есть единица телеметрии, а не пакет целиком).
+//
+// Timestamp — приближение через Header.UnixSecs (время экспорта пакета),
+// не точное время потока. Точный расчёт требует пересчёта через дельты
+// SysUptime/First/Last — оставлено на потом, не блокирует M4.
+//
+// Source — временная заглушка-тег протокола: ingest.Listener пока не
+// прокидывает адрес отправителя через пайплайн (ReadFromUDP его отбрасывает),
+// так что настоящий IP экспортёра сюда пока не попадает.
+func (r Result) Events() []storage.Event {
+	events := make([]storage.Event, len(r.Records))
+	for i, rec := range r.Records {
+		events[i] = storage.Event{
+			Timestamp: int64(r.Header.UnixSecs),
+			Source:    "netflow5",
+			Fields: map[string]any{
+				"src_addr": net.IP(rec.SrcAddr[:]).String(),
+				"dst_addr": net.IP(rec.DstAddr[:]).String(),
+				"src_port": rec.SrcPort,
+				"dst_port": rec.DstPort,
+				"protocol": rec.Prot,
+				"packets":  rec.Packets,
+				"bytes":    rec.Bytes,
+			},
+		}
+	}
+	return events
 }
 
 type Pool struct {
