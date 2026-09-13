@@ -55,6 +55,37 @@ ingest path. Packing bytes by hand with `encoding/binary.BigEndian` needs no
 reflection and writes straight into the already-sized output slice, so
 allocation count drops to 1 regardless of record count (1 to 30).
 
+### 2026-09-13 — pipeline.Result.Events: hand-rolled IPv4 formatting instead of net.IP.String()
+
+Found via `pprof` (CPU profile captured under real `loadgen -netflow5` load
+against a running collector, not a guess): `net.IP.String()` was a visible
+chunk of CPU time on the hot path, formatting `[4]byte` fields that are
+always IPv4 (`netflow.Record.SrcAddr`/`DstAddr`), never IPv6.
+
+Before: `net.IP(rec.SrcAddr[:]).String()` — generic IPv4/IPv6 detection and
+formatting for an address whose family is already known.
+
+After: `formatIPv4`/`appendDecimalByte` (`internal/pipeline/pool.go`) write
+decimal digits directly into a stack-allocated `[15]byte`, one `string()`
+conversion at the end.
+
+```
+                          │ events_old.txt │           events_new.txt           │
+                          │     sec/op     │   sec/op     vs base                │
+ResultEvents-8                   395.8n ± 1%   376.9n ± 2%  -4.78% (p=0.001 n=10)
+ResultEvents_MaxRecords-8         11.27µ ± 4%   10.45µ ± 1%  -7.32% (p=0.000 n=10)
+geomean                           2.112µ        1.984µ       -6.06%
+```
+
+Why: skips `net.IP.String()`'s generic dual-family logic — CPU-time win only.
+Allocs/op and B/op are unchanged (432 B, 8 allocs — confirmed via benchstat,
+`~ (p=1.000)`): the same single `string()` conversion is unavoidable either
+way. The dominant allocation cost on this path is actually the
+`map[string]any` construction in the same function (~4.4GB of ~6GB
+allocated in a profiled load run) — that needs `storage.Event.Fields`'s
+type to change to fix, a separate, larger, cross-backend piece of work not
+done here.
+
 Template for each entry:
 
 ```

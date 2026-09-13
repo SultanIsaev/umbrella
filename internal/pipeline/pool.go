@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
 
@@ -32,8 +31,8 @@ func (r Result) Events() []storage.Event {
 			Timestamp: int64(r.Header.UnixSecs),
 			Source:    "netflow5",
 			Fields: map[string]any{
-				"src_addr": net.IP(rec.SrcAddr[:]).String(),
-				"dst_addr": net.IP(rec.DstAddr[:]).String(),
+				"src_addr": formatIPv4(rec.SrcAddr),
+				"dst_addr": formatIPv4(rec.DstAddr),
 				"src_port": rec.SrcPort,
 				"dst_port": rec.DstPort,
 				"protocol": rec.Prot,
@@ -43,6 +42,45 @@ func (r Result) Events() []storage.Event {
 		}
 	}
 	return events
+}
+
+// formatIPv4 форматирует 4 байта в точечно-десятичную нотацию
+// ("10.0.0.1") без net.IP.String(): тот делает общую IPv4/IPv6
+// детекцию и форматирование под оба случая, чего здесь не нужно — тип
+// адреса уже точно известен ([4]byte из NetFlow v5 Record). Профилирование
+// под loadgen (docs/benchmarks.md) показало net.IP.String() заметной
+// частью аллокаций на этом горячем пути.
+func formatIPv4(ip [4]byte) string {
+	var buf [15]byte // "255.255.255.255" — максимум 15 символов
+	n := 0
+	for i, b := range ip {
+		if i > 0 {
+			buf[n] = '.'
+			n++
+		}
+		n += appendDecimalByte(buf[n:], b)
+	}
+	return string(buf[:n])
+}
+
+// appendDecimalByte пишет десятичное представление b в dst (без ведущих
+// нулей) и возвращает число записанных байт. dst должен вмещать минимум 3
+// байта — вызывающий код (formatIPv4) это гарантирует.
+func appendDecimalByte(dst []byte, b byte) int {
+	switch {
+	case b >= 100:
+		dst[0] = '0' + b/100
+		dst[1] = '0' + b/10%10
+		dst[2] = '0' + b%10
+		return 3
+	case b >= 10:
+		dst[0] = '0' + b/10
+		dst[1] = '0' + b%10
+		return 2
+	default:
+		dst[0] = '0' + b
+		return 1
+	}
 }
 
 type Pool struct {

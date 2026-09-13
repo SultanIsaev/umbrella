@@ -14,6 +14,65 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+func TestFormatIPv4(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   [4]byte
+		want string
+	}{
+		{name: "все нули", ip: [4]byte{0, 0, 0, 0}, want: "0.0.0.0"},
+		{name: "максимум", ip: [4]byte{255, 255, 255, 255}, want: "255.255.255.255"},
+		{name: "смешанные разрядности", ip: [4]byte{10, 0, 5, 123}, want: "10.0.5.123"},
+		{name: "однозначные во всех октетах", ip: [4]byte{1, 2, 3, 4}, want: "1.2.3.4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, formatIPv4(tt.ip))
+		})
+	}
+}
+
+func TestResult_Events(t *testing.T) {
+	r := Result{
+		Header: netflow.Header{UnixSecs: 1_700_000_000, Count: 2},
+		Records: []netflow.Record{
+			{
+				SrcAddr: [4]byte{10, 0, 0, 1}, DstAddr: [4]byte{8, 8, 8, 8},
+				SrcPort: 44332, DstPort: 443, Prot: 6, Packets: 10, Bytes: 1500,
+			},
+			{
+				SrcAddr: [4]byte{192, 168, 1, 1}, DstAddr: [4]byte{1, 1, 1, 1},
+				SrcPort: 53, DstPort: 12345, Prot: 17, Packets: 1, Bytes: 64,
+			},
+		},
+	}
+
+	events := r.Events()
+	require.Len(t, events, 2)
+
+	require.Equal(t, int64(1_700_000_000), events[0].Timestamp)
+	require.Equal(t, "netflow5", events[0].Source)
+	require.Equal(t, map[string]any{
+		"src_addr": "10.0.0.1",
+		"dst_addr": "8.8.8.8",
+		"src_port": uint16(44332),
+		"dst_port": uint16(443),
+		"protocol": uint8(6),
+		"packets":  uint32(10),
+		"bytes":    uint32(1500),
+	}, events[0].Fields)
+
+	require.Equal(t, map[string]any{
+		"src_addr": "192.168.1.1",
+		"dst_addr": "1.1.1.1",
+		"src_port": uint16(53),
+		"dst_port": uint16(12345),
+		"protocol": uint8(17),
+		"packets":  uint32(1),
+		"bytes":    uint32(64),
+	}, events[1].Fields)
+}
+
 // validPacket собирает синтетический, но валидный NetFlow v5 пакет с одной
 // записью — DecodeV5 должен разобрать его без ошибок.
 func validPacket(t *testing.T, srcPort uint16) []byte {
