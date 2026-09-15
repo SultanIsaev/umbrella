@@ -1,34 +1,35 @@
-# Benchmarks
+# Бенчмарки
 
-Every entry here is a `benchstat` comparison for one concrete optimization —
-not a one-off number. Reproduce with:
+Каждая запись здесь — это `benchstat`-сравнение для одной конкретной
+оптимизации, а не разовая цифра "на глаз". Воспроизвести:
 
 ```sh
 go test -run=^$ -bench=<Name> -benchmem -count=10 ./... > old.txt
-# apply the change
+# применить изменение
 go test -run=^$ -bench=<Name> -benchmem -count=10 ./... > new.txt
 benchstat old.txt new.txt
 ```
 
-For end-to-end throughput (PPS/EPS against a running collector), use
-`cmd/loadgen`:
+Для end-to-end пропускной способности (PPS/EPS против реально запущенного
+collector'а) — `cmd/loadgen`:
 
 ```sh
 go run ./cmd/loadgen -target 127.0.0.1:2055 -pps 50000 -duration 30s
 ```
 
-## Log
+## Журнал
 
-### 2026-09-10 — NetFlow v5 EncodeV5/DecodeV5: manual byte packing instead of encoding/binary reflection
+### 2026-09-10 — NetFlow v5 EncodeV5/DecodeV5: ручная упаковка байт вместо reflection в encoding/binary
 
-Before: `binary.Write(w, order, header)` / `binary.Read(r, order, &record)` —
-each struct argument goes through reflection (`encoding/binary`'s `encoder`/`decoder`),
-which allocates a fresh scratch buffer per call.
+До: `binary.Write(w, order, header)` / `binary.Read(r, order, &record)` —
+каждый аргумент-структура проходит через reflection (`encoder`/`decoder` из
+`encoding/binary`), что аллоцирует свежий scratch-буфер на каждый вызов.
 
-After: `binary.BigEndian.PutUint16/32` / `.Uint16/32` writing directly into one pre-sized
-`[]byte` (`putHeader`/`putRecord`/`getHeader`/`getRecord` in
-`internal/netflow/{encoderv5,decoderv5}.go`), so the whole packet is built or
-read with exactly one allocation regardless of record count.
+После: `binary.BigEndian.PutUint16/32` / `.Uint16/32` пишут напрямую в один
+заранее посчитанный по размеру `[]byte` (`putHeader`/`putRecord`/
+`getHeader`/`getRecord` в `internal/netflow/{encoderv5,decoderv5}.go`),
+поэтому весь пакет строится или разбирается ровно одной аллокацией
+независимо от числа записей.
 
 ```
                       │   old.txt    │              new.txt                │
@@ -48,26 +49,28 @@ DecodeV5_MaxRecords-8    33.000 ± 0%   1.000 ± 0%  -96.97% (p=0.000 n=10)
 geomean                   11.49        1.000       -91.30%
 ```
 
-Why: `binary.Write`/`binary.Read` allocate one scratch buffer per struct
-argument via reflection — for a 30-record packet that's 1 (header) + 30 (records) = 31 extra allocations on top of the
-output buffer, all on the hot
-ingest path. Packing bytes by hand with `encoding/binary.BigEndian` needs no
-reflection and writes straight into the already-sized output slice, so
-allocation count drops to 1 regardless of record count (1 to 30).
+Почему: `binary.Write`/`binary.Read` аллоцируют по одному scratch-буферу на
+каждый аргумент-структуру через reflection — для пакета с 30 записями это
+1 (заголовок) + 30 (записи) = 31 лишняя аллокация поверх выходного буфера,
+и всё это на hot path приёма. Ручная упаковка байт через
+`encoding/binary.BigEndian` не требует reflection и пишет прямо в уже
+выделенный по размеру слайс, поэтому число аллокаций падает до 1
+независимо от числа записей (от 1 до 30).
 
-### 2026-09-13 — pipeline.Result.Events: hand-rolled IPv4 formatting instead of net.IP.String()
+### 2026-09-13 — pipeline.Result.Events: форматирование IPv4 вручную вместо net.IP.String()
 
-Found via `pprof` (CPU profile captured under real `loadgen -netflow5` load
-against a running collector, not a guess): `net.IP.String()` was a visible
-chunk of CPU time on the hot path, formatting `[4]byte` fields that are
-always IPv4 (`netflow.Record.SrcAddr`/`DstAddr`), never IPv6.
+Найдено через `pprof` (CPU-профиль снят под реальной нагрузкой
+`loadgen -netflow5` на запущенном collector'е, не предположение):
+`net.IP.String()` занимал заметный кусок CPU-времени на hot path,
+форматируя поля `[4]byte`, которые всегда IPv4 (`netflow.Record.SrcAddr`/
+`DstAddr`), никогда не IPv6.
 
-Before: `net.IP(rec.SrcAddr[:]).String()` — generic IPv4/IPv6 detection and
-formatting for an address whose family is already known.
+До: `net.IP(rec.SrcAddr[:]).String()` — общая логика определения и
+форматирования IPv4/IPv6 для адреса, чья семья уже заранее известна.
 
-After: `formatIPv4`/`appendDecimalByte` (`internal/pipeline/pool.go`) write
-decimal digits directly into a stack-allocated `[15]byte`, one `string()`
-conversion at the end.
+После: `formatIPv4`/`appendDecimalByte` (`internal/pipeline/pool.go`) пишут
+десятичные цифры прямо в стековый `[15]byte`, одно преобразование
+`string()` в конце.
 
 ```
                           │ events_old.txt │           events_new.txt           │
@@ -77,35 +80,37 @@ ResultEvents_MaxRecords-8         11.27µ ± 4%   10.45µ ± 1%  -7.32% (p=0.000
 geomean                           2.112µ        1.984µ       -6.06%
 ```
 
-Why: skips `net.IP.String()`'s generic dual-family logic — CPU-time win only.
-Allocs/op and B/op are unchanged (432 B, 8 allocs — confirmed via benchstat,
-`~ (p=1.000)`): the same single `string()` conversion is unavoidable either
-way. The dominant allocation cost on this path is actually the
-`map[string]any` construction in the same function (~4.4GB of ~6GB
-allocated in a profiled load run) — that needs `storage.Event.Fields`'s
-type to change to fix, a separate, larger, cross-backend piece of work not
-done here.
+Почему: пропускает общую dual-family логику `net.IP.String()` — выигрыш
+только по CPU-времени. Allocs/op и B/op не изменились (432 B, 8 allocs —
+подтверждено `benchstat`, `~ (p=1.000)`): то же самое единственное
+преобразование `string()` неизбежно в любом случае. Доминирующая статья
+аллокаций на этом пути на самом деле — построение `map[string]any` в той
+же функции (~4.4GB из ~6GB, выделенных за профилированный прогон под
+нагрузкой) — чтобы это исправить, нужно менять тип `storage.Event.Fields`,
+это отдельная, более крупная задача, затрагивающая все бэкенды, здесь не
+сделана.
 
-### 2026-09-13 — storage.Event.Fields: ordered []Field instead of map[string]any
+### 2026-09-13 — storage.Event.Fields: упорядоченный []Field вместо map[string]any
 
-Follow-up to the entry above — this is the actual fix for the allocation
-cost that one didn't touch. Confirmed via an isolated micro-benchmark before
-touching production code (constructing a 7-entry `map[string]any` vs
-`[]struct{Key string; Value any}`, forced to escape via a package-level
-sink so the compiler couldn't optimize the allocation away): map construction
-was 2 allocs/op vs 1 alloc/op for the slice.
+Продолжение записи выше — это и есть настоящее исправление той стоимости
+аллокаций, которую предыдущая оптимизация не трогала. Подтверждено
+изолированным микро-бенчмарком до правки production-кода (построение
+`map[string]any` из 7 полей против `[]struct{Key string; Value any}`,
+принудительно "убегающих" через package-level sink, чтобы компилятор не
+оптимизировал аллокацию прочь): построение map — 2 allocs/op против
+1 alloc/op у слайса.
 
-Before: `storage.Event.Fields map[string]any` — `internal/pipeline.Result.Events`
-builds one as a map literal per NetFlow record; every non-string value
-(`uint16`/`uint8`/`uint32`) is boxed into `any` separately, plus the map's
-own bucket allocation.
+До: `storage.Event.Fields map[string]any` — `internal/pipeline.Result.Events`
+строит его как map-литерал на каждую запись NetFlow; каждое нестроковое
+значение (`uint16`/`uint8`/`uint32`) упаковывается (boxing) в `any`
+отдельно, плюс аллокация самой map (bucket'ы).
 
-After: `storage.Fields []Field` (`Field{Key string; Value any}`,
-`internal/storage/storage.go`) — one allocation for the whole backing
-array. `Fields.MarshalJSON`/`UnmarshalJSON` keep the exact wire shape
-`map[string]any` had (a flat JSON object) so ClickHouse's `JSONExtract` and
-any Kafka consumer see no difference — verified with a round-trip test
-(`internal/storage/storage_test.go`).
+После: `storage.Fields []Field` (`Field{Key string; Value any}`,
+`internal/storage/storage.go`) — одна аллокация на весь backing-массив.
+`Fields.MarshalJSON`/`UnmarshalJSON` сохраняют ту же форму на проводе, что
+была у `map[string]any` (плоский JSON-объект), поэтому `JSONExtract` в
+ClickHouse и любой Kafka-консьюмер не видят разницы — проверено
+round-trip-тестом (`internal/storage/storage_test.go`).
 
 ```
                           │ events_new.txt │       events_fields_new.txt        │
@@ -127,21 +132,21 @@ ResultEvents_MaxRecords-8         211.0 ± 0%   181.0 ± 0%  -14.22% (p=0.000 n=
 geomean                           41.09        35.59       -13.36%
 ```
 
-Why: a slice literal needs one allocation for its backing array; a map
-literal needs a hashmap header plus buckets, on top of boxing the same
-values into `any` either way — the map's own structure is pure overhead a
-slice doesn't have. `Fields` stays generic across protocols (no
-NetFlow-specific struct baked into `storage.Event` — IPFIX/Syslog/CEF will
-build their own `[]Field` with different keys later), unlike hard-coding a
-typed struct, which would have been faster still but broken that
-protocol-agnostic contract.
+Почему: слайсу-литералу нужна одна аллокация на его backing-массив;
+map-литералу нужен заголовок хеш-таблицы плюс bucket'ы, вдобавок к тем же
+самым значениям, упакованным в `any` в обоих случаях, — собственная
+структура map это чистые накладные расходы, которых у слайса нет. `Fields`
+остаётся общим для всех протоколов (никакой NetFlow-специфичной структуры,
+зашитой в `storage.Event` — IPFIX/Syslog/CEF позже соберут свой `[]Field` с
+другими ключами), в отличие от хардкода типизированной структуры, которая
+была бы ещё быстрее, но сломала бы этот протокол-агностичный контракт.
 
-Template for each entry:
+Шаблон для каждой новой записи:
 
 ```
-### <date> — <what changed>
+### <дата> — <что изменилось>
 
-Before: <benchstat output>
-After:  <benchstat output>
-Why:    <one line — what made the difference>
+До:      <вывод benchstat>
+После:   <вывод benchstat>
+Почему:  <одна строка — что дало разницу>
 ```
