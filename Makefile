@@ -1,8 +1,9 @@
-.PHONY: fmt vet lint test race bench build build-collector build-loadgen docker run-collector stop-collector logs-collector clean clean-all \
+.PHONY: fmt vet lint test race bench build build-collector build-loadgen cross-build docker docker-size run-collector stop-collector logs-collector clean clean-all \
 	run-loadgen-valid run-loadgen-invalid run-loadgen-mixed \
 	clickhouse-up clickhouse-down clickhouse-logs clickhouse-cli \
 	redpanda-up redpanda-down redpanda-logs redpanda-cli \
 	grafana-up grafana-down grafana-logs \
+	systemd-verify \
 	infra-up infra-down
 
 BINDIR := bin
@@ -43,8 +44,43 @@ build-collector:
 build-loadgen:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BINDIR)/loadgen ./cmd/loadgen
 
+# Платформы для cross-build/docker-cross. GOOS/GOARCH — только пары, которые
+# реально имеет смысл поставлять: linux/amd64 и linux/arm64 — типичные
+# серверные/ARM-облачные таргеты для этого collector'а.
+CROSS_PLATFORMS := linux/amd64 linux/arm64
+
+# Собирает статический бинарник collector'а под каждую платформу из
+# CROSS_PLATFORMS в $(BINDIR)/collector-<os>-<arch> — CGO_ENABLED=0 уже
+# гарантирует статическую линковку (никакого cgo/libc), cross-build здесь
+# работает без cgo-тулчейнов под чужую архитектуру именно поэтому.
+cross-build:
+	@for platform in $(CROSS_PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		out=$(BINDIR)/collector-$$os-$$arch; \
+		echo "building $$out"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o $$out ./cmd/collector || exit 1; \
+	done
+	@echo "--- static linkage check (should say 'statically linked' for each) ---"
+	@for platform in $(CROSS_PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		file $(BINDIR)/collector-$$os-$$arch; \
+	done
+
+DOCKER_IMAGE := umbrella-collector:local
+
 docker:
-	docker build -f deploy/docker/Dockerfile -t umbrella-collector:local .
+	docker build -f deploy/docker/Dockerfile \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_DATE=$(BUILD_DATE) \
+		-t $(DOCKER_IMAGE) .
+
+# Печатает размер собранного образа (для docs/deployment.md) — байты берутся
+# из docker image inspect, а не из `docker images` (тот округляет и
+# форматирует по-разному в зависимости от версии Docker); MiB считаем сами,
+# потому что шаблонизатор `docker inspect` — обычный text/template без
+# арифметических функций (div недоступен).
+docker-size: docker
+	@bytes=$$(docker image inspect $(DOCKER_IMAGE) --format '{{.Size}}'); \
+	echo "image size: $$bytes bytes ($$(( bytes / 1048576 )) MiB)"
 
 PIDFILE := $(BINDIR)/collector.pid
 LOGFILE := $(BINDIR)/collector.log
@@ -173,6 +209,37 @@ grafana-down:
 
 grafana-logs:
 	docker compose -f deploy/docker/docker-compose.yml logs -f prometheus grafana
+
+# Проверяет, что deploy/systemd/umbrella-collector.service реально
+# стартует, а не только валиден по синтаксису — на macOS нет своего
+# systemd, поэтому поднимаем эфемерный Linux-контейнер с systemd как PID 1
+# (deploy/docker/systemd-test.Dockerfile), кладём туда собранный бинарник и
+# юнит-файл as-is, и гоняем через настоящий systemctl. Тест разрушает и
+# пересоздаёт контейнер при каждом запуске (умышленно — чистое состояние),
+# идемпотентен. Требует --privileged и смонтированный cgroupfs, поэтому не
+# входит в infra-up/CI, только по явному вызову.
+systemd-verify: cross-build
+	docker build -f deploy/docker/systemd-test.Dockerfile -t umbrella-systemd-test:local deploy/docker
+	docker rm -f umbrella-systemd-verify >/dev/null 2>&1 || true
+	docker run -d --name umbrella-systemd-verify --privileged \
+		--tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
+		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+		umbrella-systemd-test:local
+	@echo "waiting for systemd to report 'running'..."
+	@for i in $$(seq 1 25); do \
+		state=$$(docker exec umbrella-systemd-verify systemctl is-system-running 2>/dev/null || true); \
+		if [ "$$state" = "running" ] || [ "$$state" = "degraded" ]; then break; fi; \
+		sleep 0.4; \
+	done
+	docker cp $(BINDIR)/collector-linux-amd64 umbrella-systemd-verify:/usr/local/bin/collector
+	docker exec umbrella-systemd-verify chmod +x /usr/local/bin/collector
+	docker cp deploy/systemd/umbrella-collector.service umbrella-systemd-verify:/etc/systemd/system/umbrella-collector.service
+	docker exec umbrella-systemd-verify useradd --system --no-create-home --shell /usr/sbin/nologin umbrella
+	docker exec umbrella-systemd-verify systemctl daemon-reload
+	docker exec umbrella-systemd-verify systemctl start umbrella-collector
+	docker exec umbrella-systemd-verify systemctl is-active umbrella-collector
+	docker exec umbrella-systemd-verify systemctl status umbrella-collector --no-pager
+	docker rm -f umbrella-systemd-verify >/dev/null
 
 # Поднять/остановить весь локальный стек (ClickHouse + Redpanda + Prometheus
 # + Grafana) разом.
