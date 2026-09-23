@@ -9,6 +9,14 @@
 BINDIR := bin
 MODULE := github.com/SultanIsaev/umbrella
 
+# Compose-команда: предпочитаем V2-плагин (`docker compose`, поставляется с
+# современным Docker Desktop/Engine), но не у всех он есть "из коробки" —
+# например, старый standalone docker-compose (pip/brew-бинарник) или
+# Colima/Rancher Desktop без плагина. Определяем один раз при разборе
+# Makefile и переиспользуем во всех infra-таргетах ниже, вместо того чтобы
+# хардкодить одну конкретную команду.
+COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -166,35 +174,35 @@ clean:
 
 # Локальный ClickHouse для internal/storage/clickhouse (M7) — не для прод/CI.
 clickhouse-up:
-	docker compose -f deploy/docker/docker-compose.yml up -d --wait clickhouse
+	$(COMPOSE) -f deploy/docker/docker-compose.yml up -d --wait clickhouse
 
 clickhouse-down:
-	docker compose -f deploy/docker/docker-compose.yml stop clickhouse
+	$(COMPOSE) -f deploy/docker/docker-compose.yml stop clickhouse
 
 clickhouse-logs:
-	docker compose -f deploy/docker/docker-compose.yml logs -f clickhouse
+	$(COMPOSE) -f deploy/docker/docker-compose.yml logs -f clickhouse
 
 clickhouse-cli:
-	docker compose -f deploy/docker/docker-compose.yml exec clickhouse \
+	$(COMPOSE) -f deploy/docker/docker-compose.yml exec clickhouse \
 		clickhouse-client --user umbrella --password umbrella --database umbrella
 
 # Локальный Redpanda (Kafka-совместимый брокер) для internal/storage/kafka
 # (M8) — не для прод/CI. Брокер снаружи: localhost:9092.
 redpanda-up:
-	docker compose -f deploy/docker/docker-compose.yml up -d --wait redpanda
+	$(COMPOSE) -f deploy/docker/docker-compose.yml up -d --wait redpanda
 
 redpanda-down:
-	docker compose -f deploy/docker/docker-compose.yml stop redpanda
+	$(COMPOSE) -f deploy/docker/docker-compose.yml stop redpanda
 
 redpanda-logs:
-	docker compose -f deploy/docker/docker-compose.yml logs -f redpanda
+	$(COMPOSE) -f deploy/docker/docker-compose.yml logs -f redpanda
 
 # Открывает shell внутри контейнера с rpk наготове, например:
 #   rpk topic create my-topic --brokers localhost:9092
 #   rpk topic list --brokers localhost:9092
 #   rpk group describe my-group --brokers localhost:9092
 redpanda-cli:
-	docker compose -f deploy/docker/docker-compose.yml exec redpanda bash
+	$(COMPOSE) -f deploy/docker/docker-compose.yml exec redpanda bash
 
 # Локальный Prometheus + Grafana (M10). Prometheus скрейпит collector на
 # хосте (host.docker.internal:8080) — сначала запусти `make run-collector`
@@ -202,13 +210,13 @@ redpanda-cli:
 # http://localhost:3000 (анонимный доступ, сразу под Admin) — дашборд
 # "Umbrella Collector" уже там.
 grafana-up:
-	docker compose -f deploy/docker/docker-compose.yml up -d --wait prometheus grafana
+	$(COMPOSE) -f deploy/docker/docker-compose.yml up -d --wait prometheus grafana
 
 grafana-down:
-	docker compose -f deploy/docker/docker-compose.yml stop prometheus grafana
+	$(COMPOSE) -f deploy/docker/docker-compose.yml stop prometheus grafana
 
 grafana-logs:
-	docker compose -f deploy/docker/docker-compose.yml logs -f prometheus grafana
+	$(COMPOSE) -f deploy/docker/docker-compose.yml logs -f prometheus grafana
 
 # Проверяет, что deploy/systemd/umbrella-collector.service реально
 # стартует, а не только валиден по синтаксису — на macOS нет своего
@@ -244,10 +252,10 @@ systemd-verify: cross-build
 # Поднять/остановить весь локальный стек (ClickHouse + Redpanda + Prometheus
 # + Grafana) разом.
 infra-up:
-	docker compose -f deploy/docker/docker-compose.yml up -d --wait
+	$(COMPOSE) -f deploy/docker/docker-compose.yml up -d --wait
 
 infra-down:
-	docker compose -f deploy/docker/docker-compose.yml down
+	$(COMPOSE) -f deploy/docker/docker-compose.yml down
 
 # Полная очистка после сквозного цикла (run-collector + run-loadgen-* +
 # infra-up): останавливает свой collector, гасит весь docker-compose стек
@@ -256,5 +264,5 @@ infra-down:
 # это ожидаемо для локального dev/demo-стека, но не запускай не глядя, если
 # там осталось что-то, что жалко потерять.
 clean-all: stop-collector
-	docker compose -f deploy/docker/docker-compose.yml down -v
+	$(COMPOSE) -f deploy/docker/docker-compose.yml down -v
 	rm -rf $(BINDIR)

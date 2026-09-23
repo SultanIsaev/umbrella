@@ -1,12 +1,15 @@
 package pipeline
 
 import (
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
+	"github.com/SultanIsaev/umbrella/internal/ingest"
+	"github.com/SultanIsaev/umbrella/internal/ipfix"
 	"github.com/SultanIsaev/umbrella/internal/netflow"
 	"github.com/SultanIsaev/umbrella/internal/storage"
 )
@@ -14,6 +17,12 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
+
+// exporterA — фиксированный адрес отправителя для тестов, которым он
+// безразличен (всё, кроме v9/IPFIX): важно только то, что он один и тот же
+// на всём протяжении теста, чтобы попадать в один и тот же ключ кэша
+// шаблонов.
+var exporterA = netip.MustParseAddrPort("10.1.1.1:12345")
 
 func TestFormatIPv4(t *testing.T) {
 	tests := []struct {
@@ -33,8 +42,8 @@ func TestFormatIPv4(t *testing.T) {
 	}
 }
 
-func TestResult_Events(t *testing.T) {
-	r := Result{
+func TestNetflowV5Result_Events(t *testing.T) {
+	r := NetflowV5Result{
 		Header: netflow.Header{UnixSecs: 1_700_000_000, Count: 2},
 		Records: []netflow.Record{
 			{
@@ -72,6 +81,71 @@ func TestResult_Events(t *testing.T) {
 		{Key: "packets", Value: uint32(1)},
 		{Key: "bytes", Value: uint32(64)},
 	}, events[1].Fields)
+}
+
+// TestNetflowV9Result_Events проверяет, что поля идут в детерминированном
+// порядке (по возрастанию типа) вне зависимости от порядка обхода исходной
+// map[uint16][]byte — без этого тест был бы флаки.
+func TestNetflowV9Result_Events(t *testing.T) {
+	r := NetflowV9Result{
+		Header: netflow.HeaderV9{UnixSecs: 1_700_000_000},
+		Records: []netflow.RecordV9{
+			{
+				TemplateID: 256,
+				Fields: map[uint16][]byte{
+					8:  {10, 0, 0, 1},
+					12: {8, 8, 8, 8},
+					1:  {0, 0, 0, 100},
+				},
+			},
+		},
+	}
+
+	events := r.Events()
+	require.Len(t, events, 1)
+	require.Equal(t, int64(1_700_000_000), events[0].Timestamp)
+	require.Equal(t, "netflow9", events[0].Source)
+	require.Equal(t, storage.Fields{
+		{Key: "field_1", Value: "00000064"},
+		{Key: "field_8", Value: "0a000001"},
+		{Key: "field_12", Value: "08080808"},
+	}, events[0].Fields)
+}
+
+// TestIPFIXResult_Events проверяет и детерминированный порядок, и то, что
+// vendor-specific Information Element (EnterpriseNumber != 0) получают
+// отдельный формат имени.
+func TestIPFIXResult_Events(t *testing.T) {
+	r := IPFIXResult{
+		Header: ipfix.Header{ExportTime: 1_700_000_100},
+		Records: []ipfix.Record{
+			{
+				TemplateID: 300,
+				Fields: map[ipfix.FieldKey][]byte{
+					{ElementID: 8}:                      {10, 0, 0, 1},
+					{ElementID: 12}:                     {8, 8, 8, 8},
+					{EnterpriseNumber: 9, ElementID: 1}: {1},
+				},
+			},
+		},
+	}
+
+	events := r.Events()
+	require.Len(t, events, 1)
+	require.Equal(t, int64(1_700_000_100), events[0].Timestamp)
+	require.Equal(t, "ipfix", events[0].Source)
+	require.Equal(t, storage.Fields{
+		{Key: "ie_8", Value: "0a000001"},
+		{Key: "ie_12", Value: "08080808"},
+		{Key: "ie_9.1", Value: "01"},
+	}, events[0].Fields)
+}
+
+// packet собирает ingest.Packet с заданным payload и фиксированным
+// exporterA — используется везде, где адрес отправителя не варьируется в
+// рамках теста.
+func packet(data []byte) ingest.Packet {
+	return ingest.Packet{Data: data, From: exporterA}
 }
 
 // validPacket собирает синтетический, но валидный NetFlow v5 пакет с одной
@@ -142,12 +216,12 @@ func TestPool_FanOut(t *testing.T) {
 			require.NoError(t, err)
 
 			total := tt.validCount + tt.invalidCount
-			in := make(chan []byte, total)
+			in := make(chan ingest.Packet, total)
 			for i := range tt.validCount {
-				in <- validPacket(t, uint16(i))
+				in <- packet(validPacket(t, uint16(i)))
 			}
 			for range tt.invalidCount {
-				in <- invalidPacket()
+				in <- packet(invalidPacket())
 			}
 			close(in)
 
@@ -166,6 +240,46 @@ func TestPool_FanOut(t *testing.T) {
 	}
 }
 
+// TestPool_Dispatch проверяет диспетчеризацию по версии протокола: NetFlow
+// v9 и IPFIX должны декодироваться через соответствующий TemplateCache (а не
+// молча попадать в invalid), а неизвестная версия и слишком короткий пакет —
+// отбраковываться.
+func TestPool_Dispatch(t *testing.T) {
+	v9Header, v9Records := []byte{0x00, 0x09, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, []byte(nil)
+	_ = v9Records
+
+	pool, err := New(1)
+	require.NoError(t, err)
+
+	// NetFlow v9 без единого Template FlowSet: пакет структурно валиден
+	// (Count=1 FlowSet, но сам FlowSet будет прочитан ниже), поэтому просто
+	// проверим, что v9-пакет с валидным заголовком и без Data FlowSet'ов
+	// декодируется без ошибки и не попадает в invalid.
+	//
+	// FlowSet: templateFlowSetID(0), длина 4 (только заголовок, без записей) —
+	// минимальный структурно валидный FlowSet.
+	v9Packet := append(append([]byte{}, v9Header...), 0x00, 0x00, 0x00, 0x04)
+
+	results := make(chan Result, 3)
+	in := make(chan ingest.Packet, 3)
+	in <- ingest.Packet{Data: v9Packet, From: exporterA}
+	in <- ingest.Packet{Data: []byte{0x00, 0x0a}, From: exporterA} // IPFIX, но короче headerSize -> error
+	in <- ingest.Packet{Data: []byte{0x00, 0x63}, From: exporterA} // версия 99 — не поддерживается
+	close(in)
+
+	pool.Run(in, results)
+
+	var got []Result
+	for r := range results {
+		got = append(got, r)
+	}
+
+	require.Len(t, got, 1, "только валидный v9-пакет должен дойти до results")
+	_, isV9 := got[0].(NetflowV9Result)
+	require.True(t, isV9, "результат должен быть NetflowV9Result")
+	require.Equal(t, uint64(2), pool.Invalid())
+}
+
 // TestPool_GracefulShutdown проверяет две стороны остановки: пул не должен
 // завершаться, пока in не закрыт (даже если все отправленные пакеты уже
 // разобраны и воркеры простаивают в ожидании следующих), и обязан
@@ -182,7 +296,7 @@ func TestPool_GracefulShutdown(t *testing.T) {
 	pool, err := New(4)
 	require.NoError(t, err)
 
-	in := make(chan []byte)
+	in := make(chan ingest.Packet)
 	const total = 10
 	results := make(chan Result, total)
 
@@ -193,7 +307,7 @@ func TestPool_GracefulShutdown(t *testing.T) {
 	}()
 
 	for i := range total {
-		in <- validPacket(t, uint16(i))
+		in <- packet(validPacket(t, uint16(i)))
 	}
 
 	select {
@@ -225,7 +339,7 @@ func TestPool_EmptyInput(t *testing.T) {
 	pool, err := New(4)
 	require.NoError(t, err)
 
-	in := make(chan []byte)
+	in := make(chan ingest.Packet)
 	close(in)
 
 	results := make(chan Result)

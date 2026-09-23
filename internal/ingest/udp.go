@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync/atomic"
 )
 
@@ -43,6 +44,16 @@ type Listener struct {
 	truncated atomic.Uint64 // Метрика усеченных пакетов
 }
 
+// Packet — сырые данные одной UDP-датаграммы вместе с адресом отправителя.
+// Адрес нужен не самому ingest, а pipeline.Pool: NetFlow v9/IPFIX стейтфулны
+// (шаблоны кэшируются в разрезе экспортёра — см.
+// netflow.TemplateCache.DecodeV9/ipfix.TemplateCache.Decode), NetFlow v5 его
+// игнорирует, так как у него нет шаблонов.
+type Packet struct {
+	Data []byte
+	From netip.AddrPort
+}
+
 func NewListener(addr string) (*Listener, error) {
 	resolvedAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
@@ -69,7 +80,7 @@ func NewListener(addr string) (*Listener, error) {
 // в будущем несколько Listener (SO_REUSEPORT) будут писать в один общий канал для масштабирования приёма
 // и закрыть его вправе только оркестратор, дождавшийся остановки всех писателей,
 // а не отдельный Listener.
-func (l *Listener) Run(ctx context.Context, out chan<- []byte) error {
+func (l *Listener) Run(ctx context.Context, out chan<- Packet) error {
 	stopContextWatch := context.AfterFunc(ctx, func() {
 		_ = l.conn.Close()
 	})
@@ -78,7 +89,10 @@ func (l *Listener) Run(ctx context.Context, out chan<- []byte) error {
 
 	buf := make([]byte, bufferSize)
 	for {
-		n, _, err := l.conn.ReadFromUDP(buf)
+		// ReadFromUDPAddrPort вместо ReadFromUDP: возвращает netip.AddrPort
+		// без аллокации (в отличие от *net.UDPAddr), а адрес отправителя нам
+		// теперь реально нужен дальше по пайплайну (см. Packet).
+		n, addrPort, err := l.conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			// Проверяем было ли закрытие сокета запланированным
 			if ctx.Err() != nil {
@@ -99,7 +113,7 @@ func (l *Listener) Run(ctx context.Context, out chan<- []byte) error {
 
 		data := make([]byte, n)
 		copy(data, buf[:n])
-		l.dispatch(out, data)
+		l.dispatch(out, Packet{Data: data, From: addrPort})
 	}
 }
 
@@ -108,10 +122,10 @@ func (l *Listener) Run(ctx context.Context, out chan<- []byte) error {
 // в метрике. Вынесен из Run отдельным методом, чтобы backpressure-решение
 // можно было тестировать детерминированно (через ёмкость буфера канала),
 // не гоняясь за таймингом реального читателя.
-func (l *Listener) dispatch(out chan<- []byte, data []byte) {
+func (l *Listener) dispatch(out chan<- Packet, pkt Packet) {
 	l.received.Add(1)
 	select {
-	case out <- data:
+	case out <- pkt:
 		// Пакет успешно ушел в очередь на обработку.
 	default:
 		// Очередь переполнена (Drop + метрика)

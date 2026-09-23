@@ -60,7 +60,7 @@ func run() error {
 
 	metrics := observability.NewMetrics()
 
-	out := make(chan []byte, 1024) // TODO: емкость пересчитать под реальный pipeline
+	out := make(chan ingest.Packet, 1024) // TODO: емкость пересчитать под реальный pipeline
 
 	results := make(chan pipeline.Result, 1000)
 	pool, err := pipeline.New(runtime.GOMAXPROCS(0))
@@ -188,7 +188,7 @@ func runConsumer(ctx context.Context, results <-chan pipeline.Result, store stor
 // ingest.Listener/pipeline.Pool и текущую длину каналов out/results как
 // Prometheus counter/gauge-функции (см. observability.Metrics doc-
 // комментарий) — сами эти пакеты остаются без зависимости от Prometheus.
-func registerMetrics(metrics *observability.Metrics, listener *ingest.Listener, pool *pipeline.Pool, out chan []byte, results chan pipeline.Result) {
+func registerMetrics(metrics *observability.Metrics, listener *ingest.Listener, pool *pipeline.Pool, out chan ingest.Packet, results chan pipeline.Result) {
 	metrics.RegisterCounterFunc("ingest", "packets_received_total",
 		"Total number of UDP packets received.",
 		func() float64 { return float64(listener.Received()) })

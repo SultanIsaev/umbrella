@@ -21,7 +21,7 @@ func TestHappyPath(t *testing.T) {
 	listener, err := NewListener("127.0.0.1:0")
 	require.NoError(t, err)
 
-	out := make(chan []byte, 1)
+	out := make(chan Packet, 1)
 
 	// 1. Запуск Run
 	runErrCh := make(chan error, 1)
@@ -45,7 +45,8 @@ func TestHappyPath(t *testing.T) {
 			t.Fatal("out unexpectedly closed")
 		}
 
-		require.Equal(t, payload, v)
+		require.Equal(t, payload, v.Data)
+		require.Equal(t, listener.LocalAddr().(*net.UDPAddr).IP.String(), v.From.Addr().String())
 	case <-time.After(2 * time.Second):
 		t.Errorf("listener.Run execution timeout")
 	}
@@ -106,10 +107,10 @@ func TestDispatch(t *testing.T) {
 			require.NoError(t, err)
 			defer listener.Close()
 
-			out := make(chan []byte, tt.bufSize)
+			out := make(chan Packet, tt.bufSize)
 
 			for range tt.packets {
-				listener.dispatch(out, []byte("hello"))
+				listener.dispatch(out, Packet{Data: []byte("hello")})
 			}
 
 			require.Equal(t, tt.wantReceived, listener.Received())
@@ -137,7 +138,7 @@ func TestRunBackpressure(t *testing.T) {
 	listener, err := NewListener("127.0.0.1:0")
 	require.NoError(t, err)
 
-	out := make(chan []byte, 1)
+	out := make(chan Packet, 1)
 
 	runErrCh := make(chan error, 1)
 	go func() {
@@ -173,7 +174,7 @@ func TestRunBackpressure(t *testing.T) {
 
 	select {
 	case v := <-out:
-		require.Equal(t, payload, v)
+		require.Equal(t, payload, v.Data)
 	default:
 		t.Fatal("expected one packet buffered in out")
 	}
@@ -191,7 +192,7 @@ func TestTruncated(t *testing.T) {
 	listener, err := NewListener("127.0.0.1:0")
 	require.NoError(t, err)
 
-	out := make(chan []byte, 1)
+	out := make(chan Packet, 1)
 
 	runErrCh := make(chan error, 1)
 	go func() {
@@ -242,7 +243,7 @@ func TestRunErr(t *testing.T) {
 	listener, err := NewListener("127.0.0.1:0")
 	require.NoError(t, err)
 
-	out := make(chan []byte, 1)
+	out := make(chan Packet, 1)
 
 	runErrCh := make(chan error, 1)
 	go func() {

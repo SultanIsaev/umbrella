@@ -6,7 +6,7 @@ import (
 	"github.com/SultanIsaev/umbrella/internal/netflow"
 )
 
-func sampleResult(recordCount int) Result {
+func sampleResult(recordCount int) NetflowV5Result {
 	records := make([]netflow.Record, recordCount)
 	for i := range records {
 		records[i] = netflow.Record{
@@ -19,7 +19,7 @@ func sampleResult(recordCount int) Result {
 			Prot:    6,
 		}
 	}
-	return Result{
+	return NetflowV5Result{
 		Header:  netflow.Header{UnixSecs: 1_700_000_000, Count: uint16(recordCount)},
 		Records: records,
 	}

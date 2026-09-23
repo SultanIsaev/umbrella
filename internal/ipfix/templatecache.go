@@ -51,9 +51,8 @@ func (c *TemplateCache) MalformedDataSet() uint64 {
 // Decode разбирает IPFIX Message: обновляет кэш шаблонов из Template Set'ов
 // и декодирует Data Set'ы, для которых шаблон уже известен.
 //
-// exporterKey идентифицирует источник пакета — тот же паттерн и тот же
-// известный пробел (адрес экспортёра пока не прокидывается через
-// пайплайн), что и у netflow.TemplateCache.DecodeV9.
+// exporterKey идентифицирует источник пакета — тот же паттерн, что и у
+// netflow.TemplateCache.DecodeV9 (см. его doc про ingest.Packet.From).
 //
 // Ошибка возвращается только при нарушении структуры сообщения. Data Set с
 // неизвестным шаблоном — не ошибка (см. UnknownTemplate): сообщение
